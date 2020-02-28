@@ -1,0 +1,21 @@
+[package]
+name = "task-thread-cmp"
+version = "0.1.0"
+authors = ["Heinz Gies <hgies@wayfair.com>"]
+edition = "2018"
+
+[[bin]]
+name = "threads"
+path = "src/threads.rs"
+
+[[bin]]
+name = "tasks"
+path = "src/tasks.rs"
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+async-std = {version = "*", features = ["unstable"]}
+crossbeam-channel = "*"
