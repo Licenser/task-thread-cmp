@@ -1,0 +1,419 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="406" onload="init(evt)" viewBox="0 0 1200 406" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[var nametype = 'Function:';
+var fontsize = 12;
+var fontwidth = 0.59;
+var xpad = 10;
+var inverted = false;
+var searchcolor = 'rgb(230,0,230)';
+var fluiddrawing = true;
+var truncate_text_right = false;]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+            var params = get_params()
+            params.x = el.attributes._orig_x.value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["_orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("_orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["_orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+    e.removeAttribute("_orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.attributes != undefined) {
+        orig_load(e, "x");
+        orig_load(e, "width");
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, ratio) {
+    if (e.attributes != undefined) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = format_percent((parseFloat(e.attributes.x.value) - x) * ratio);
+            if (e.tagName == "text") {
+                e.attributes.x.value = format_percent(parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value) + (100 * 3 / frames.attributes.width.value));
+            }
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = format_percent(parseFloat(e.attributes.width.value) * ratio);
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, ratio);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseFloat(attr.width.value);
+    var xmin = parseFloat(attr.x.value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    var ratio = 100 / width;
+    // XXX: Workaround for JavaScript float issues (fix me)
+    var fudge = 0.001;
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseFloat(a.x.value);
+        var ew = parseFloat(a.width.value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex + fudge >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, ratio);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseFloat(rect.attributes.width.value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseFloat(rect.attributes.x.value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    var fudge = 0.0001;    // JavaScript floating point
+    for (var k in keys) {
+        var x = parseFloat(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw - fudge) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="406" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">Flame Graph</text><text id="details" x="10" y="389.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="389.00"> </text><svg id="frames" x="10" width="1180"><g><title>libdyld.dylib`tlv_get_addr (144 samples, 0.17%)</title><rect x="0.0000%" y="197" width="0.1680%" height="15" fill="rgb(227,0,7)"/><text x="0.2500%" y="207.50"></text></g><g><title>libsystem_kernel.dylib`swtch_pri (8,338 samples, 9.72%)</title><rect x="0.9377%" y="181" width="9.7249%" height="15" fill="rgb(217,0,24)"/><text x="1.1877%" y="191.50">libsystem_kern..</text></g><g><title>libsystem_kernel.dylib`__psynch_mutexdrop (829 samples, 0.97%)</title><rect x="10.6929%" y="165" width="0.9669%" height="15" fill="rgb(221,193,54)"/><text x="10.9429%" y="175.50"></text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_firstfit_unlock_slow (838 samples, 0.98%)</title><rect x="10.6883%" y="181" width="0.9774%" height="15" fill="rgb(248,212,6)"/><text x="10.9383%" y="191.50"></text></g><g><title>libsystem_pthread.dylib`pthread_mutex_lock (380 samples, 0.44%)</title><rect x="11.6726%" y="181" width="0.4432%" height="15" fill="rgb(208,68,35)"/><text x="11.9226%" y="191.50"></text></g><g><title>libsystem_pthread.dylib`sched_yield (121 samples, 0.14%)</title><rect x="12.1158%" y="181" width="0.1411%" height="15" fill="rgb(232,128,0)"/><text x="12.3658%" y="191.50"></text></g><g><title>libdyld.dylib`tlv_get_addr (359 samples, 0.42%)</title><rect x="16.0849%" y="149" width="0.4187%" height="15" fill="rgb(207,160,47)"/><text x="16.3349%" y="159.50"></text></g><g><title>tasks`crossbeam_epoch::default::HANDLE::__getit (341 samples, 0.40%)</title><rect x="16.5910%" y="149" width="0.3977%" height="15" fill="rgb(228,23,34)"/><text x="16.8410%" y="159.50"></text></g><g><title>libdyld.dylib`tlv_get_addr (295 samples, 0.34%)</title><rect x="20.5542%" y="133" width="0.3441%" height="15" fill="rgb(218,30,26)"/><text x="20.8042%" y="143.50"></text></g><g><title>tasks`crossbeam_epoch::default::HANDLE::__getit (319 samples, 0.37%)</title><rect x="20.9356%" y="133" width="0.3721%" height="15" fill="rgb(220,122,19)"/><text x="21.1856%" y="143.50"></text></g><g><title>tasks`crossbeam_epoch::internal::Global::try_advance (1,046 samples, 1.22%)</title><rect x="21.4395%" y="117" width="1.2200%" height="15" fill="rgb(250,228,42)"/><text x="21.6895%" y="127.50"></text></g><g><title>tasks`&lt;crossbeam_epoch::sync::list::Iter&lt;T,C&gt; as core::iter::traits::iterator::Iterator&gt;::next (918 samples, 1.07%)</title><rect x="21.5888%" y="101" width="1.0707%" height="15" fill="rgb(240,193,28)"/><text x="21.8388%" y="111.50"></text></g><g><title>tasks`crossbeam_epoch::internal::Global::collect (2,322 samples, 2.71%)</title><rect x="21.3077%" y="133" width="2.7082%" height="15" fill="rgb(216,20,37)"/><text x="21.5577%" y="143.50">ta..</text></g><g><title>tasks`crossbeam_epoch::sync::queue::Queue&lt;T&gt;::try_pop_if (1,163 samples, 1.36%)</title><rect x="22.6595%" y="117" width="1.3564%" height="15" fill="rgb(206,188,39)"/><text x="22.9095%" y="127.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (264 samples, 0.31%)</title><rect x="23.7080%" y="101" width="0.3079%" height="15" fill="rgb(217,207,13)"/><text x="23.9580%" y="111.50"></text></g><g><title>tasks`crossbeam_epoch::default::pin (6,046 samples, 7.05%)</title><rect x="16.9888%" y="149" width="7.0516%" height="15" fill="rgb(231,73,38)"/><text x="17.2388%" y="159.50">tasks`cro..</text></g><g><title>tasks`crossbeam_deque::Stealer&lt;T&gt;::steal_batch_and_pop (9,317 samples, 10.87%)</title><rect x="13.2005%" y="165" width="10.8667%" height="15" fill="rgb(225,20,46)"/><text x="13.4505%" y="175.50">tasks`crossbeam_..</text></g><g><title>tasks`crossbeam_epoch::default::HANDLE::__getit (96 samples, 0.11%)</title><rect x="24.1255%" y="165" width="0.1120%" height="15" fill="rgb(210,31,41)"/><text x="24.3755%" y="175.50"></text></g><g><title>tasks`async_std::task::executor::pool::find_runnable::_{{closure}}::_{{closure}}::_{{closure}}::_{{closure}} (10,347 samples, 12.07%)</title><rect x="12.2616%" y="181" width="12.0680%" height="15" fill="rgb(221,200,47)"/><text x="12.5116%" y="191.50">tasks`async_std::t..</text></g><g><title>libsystem_kernel.dylib`__psynch_cvwait (7,710 samples, 8.99%)</title><rect x="24.5897%" y="165" width="8.9924%" height="15" fill="rgb(226,26,5)"/><text x="24.8397%" y="175.50">libsystem_ker..</text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_droplock (135 samples, 0.16%)</title><rect x="33.8294%" y="149" width="0.1575%" height="15" fill="rgb(249,33,26)"/><text x="34.0794%" y="159.50"></text></g><g><title>libsystem_kernel.dylib`__psynch_mutexwait (2,557 samples, 2.98%)</title><rect x="33.9950%" y="133" width="2.9823%" height="15" fill="rgb(235,183,28)"/><text x="34.2450%" y="143.50">lib..</text></g><g><title>libsystem_pthread.dylib`_pthread_cond_wait (2,984 samples, 3.48%)</title><rect x="33.5833%" y="165" width="3.4803%" height="15" fill="rgb(221,5,38)"/><text x="33.8333%" y="175.50">lib..</text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_firstfit_lock_slow (2,638 samples, 3.08%)</title><rect x="33.9869%" y="149" width="3.0768%" height="15" fill="rgb(247,18,42)"/><text x="34.2369%" y="159.50">lib..</text></g><g><title>libsystem_kernel.dylib`__psynch_mutexwait (2,002 samples, 2.33%)</title><rect x="37.1220%" y="149" width="2.3350%" height="15" fill="rgb(241,131,45)"/><text x="37.3720%" y="159.50">l..</text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_firstfit_lock_slow (2,114 samples, 2.47%)</title><rect x="37.0660%" y="165" width="2.4656%" height="15" fill="rgb(249,31,29)"/><text x="37.3160%" y="175.50">li..</text></g><g><title>tasks`async_std::task::executor::sleepers::Sleepers::wait (13,158 samples, 15.35%)</title><rect x="24.3297%" y="181" width="15.3466%" height="15" fill="rgb(225,111,53)"/><text x="24.5797%" y="191.50">tasks`async_std::task::e..</text></g><g><title>tasks`crossbeam_deque::Injector&lt;T&gt;::steal_batch_and_pop (292 samples, 0.34%)</title><rect x="39.8150%" y="181" width="0.3406%" height="15" fill="rgb(238,160,17)"/><text x="40.0650%" y="191.50"></text></g><g><title>libdyld.dylib`tlv_get_addr (120 samples, 0.14%)</title><rect x="43.8564%" y="133" width="0.1400%" height="15" fill="rgb(214,148,48)"/><text x="44.1064%" y="143.50"></text></g><g><title>tasks`&lt;async_std::sync::channel::Receiver&lt;T&gt;::recv::{{closure}}::RecvFuture&lt;T&gt; as core::future::future::Future&gt;::poll (86 samples, 0.10%)</title><rect x="43.9963%" y="133" width="0.1003%" height="15" fill="rgb(232,36,49)"/><text x="44.2463%" y="143.50"></text></g><g><title>tasks`&lt;async_std::sync::channel::Sender&lt;T&gt;::send::{{closure}}::SendFuture&lt;T&gt; as core::future::future::Future&gt;::poll (173 samples, 0.20%)</title><rect x="44.0966%" y="133" width="0.2018%" height="15" fill="rgb(209,103,24)"/><text x="44.3466%" y="143.50"></text></g><g><title>tasks`&lt;std::future::SetOnDrop as core::ops::drop::Drop&gt;::drop (403 samples, 0.47%)</title><rect x="44.2984%" y="133" width="0.4700%" height="15" fill="rgb(229,88,8)"/><text x="44.5484%" y="143.50"></text></g><g><title>tasks`std::future::TLS_CX::__getit (238 samples, 0.28%)</title><rect x="44.7684%" y="133" width="0.2776%" height="15" fill="rgb(213,181,19)"/><text x="45.0184%" y="143.50"></text></g><g><title>libdyld.dylib`tlv_get_addr (3,800 samples, 4.43%)</title><rect x="48.1415%" y="117" width="4.4321%" height="15" fill="rgb(254,191,54)"/><text x="48.3915%" y="127.50">libdy..</text></g><g><title>tasks`async_task::raw::RawTask&lt;F,R,S,T&gt;::clone_waker (114 samples, 0.13%)</title><rect x="61.7910%" y="85" width="0.1330%" height="15" fill="rgb(241,83,37)"/><text x="62.0410%" y="95.50"></text></g><g><title>tasks`async_std::sync::waker_set::WakerSet::insert (918 samples, 1.07%)</title><rect x="60.8568%" y="101" width="1.0707%" height="15" fill="rgb(233,36,39)"/><text x="61.1068%" y="111.50"></text></g><g><title>libsystem_kernel.dylib`__psynch_cvsignal (1,439 samples, 1.68%)</title><rect x="62.3007%" y="53" width="1.6783%" height="15" fill="rgb(226,3,54)"/><text x="62.5507%" y="63.50"></text></g><g><title>libsystem_kernel.dylib`__psynch_mutexwait (134 samples, 0.16%)</title><rect x="63.9942%" y="37" width="0.1563%" height="15" fill="rgb(245,192,40)"/><text x="64.2442%" y="47.50"></text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_firstfit_lock_slow (146 samples, 0.17%)</title><rect x="63.9861%" y="53" width="0.1703%" height="15" fill="rgb(238,167,29)"/><text x="64.2361%" y="63.50"></text></g><g><title>libsystem_kernel.dylib`__psynch_mutexdrop (664 samples, 0.77%)</title><rect x="64.1633%" y="37" width="0.7744%" height="15" fill="rgb(232,182,51)"/><text x="64.4133%" y="47.50"></text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_firstfit_unlock_slow (673 samples, 0.78%)</title><rect x="64.1563%" y="53" width="0.7849%" height="15" fill="rgb(231,60,39)"/><text x="64.4063%" y="63.50"></text></g><g><title>tasks`async_std::task::executor::sleepers::Sleepers::notify_one (2,347 samples, 2.74%)</title><rect x="62.2750%" y="69" width="2.7374%" height="15" fill="rgb(208,69,12)"/><text x="62.5250%" y="79.50">ta..</text></g><g><title>tasks`async_std::task::executor::pool::schedule (2,452 samples, 2.86%)</title><rect x="62.1619%" y="85" width="2.8598%" height="15" fill="rgb(235,93,37)"/><text x="62.4119%" y="95.50">ta..</text></g><g><title>tasks`async_std::sync::waker_set::WakerSet::notify (2,706 samples, 3.16%)</title><rect x="61.9275%" y="101" width="3.1561%" height="15" fill="rgb(213,116,39)"/><text x="62.1775%" y="111.50">tas..</text></g><g><title>tasks`async_std::sync::waker_set::WakerSet::remove (479 samples, 0.56%)</title><rect x="65.0836%" y="101" width="0.5587%" height="15" fill="rgb(222,207,29)"/><text x="65.3336%" y="111.50"></text></g><g><title>tasks`&lt;async_std::sync::channel::Receiver&lt;T&gt;::recv::{{closure}}::RecvFuture&lt;T&gt; as core::future::future::Future&gt;::poll (11,238 samples, 13.11%)</title><rect x="52.5735%" y="117" width="13.1072%" height="15" fill="rgb(206,96,30)"/><text x="52.8235%" y="127.50">tasks`&lt;async_std::sy..</text></g><g><title>tasks`async_std::sync::waker_set::WakerSet::insert (911 samples, 1.06%)</title><rect x="74.3407%" y="101" width="1.0625%" height="15" fill="rgb(218,138,4)"/><text x="74.5907%" y="111.50"></text></g><g><title>tasks`async_task::raw::RawTask&lt;F,R,S,T&gt;::clone_waker (97 samples, 0.11%)</title><rect x="75.2901%" y="85" width="0.1131%" height="15" fill="rgb(250,191,14)"/><text x="75.5401%" y="95.50"></text></g><g><title>libsystem_kernel.dylib`__psynch_cvsignal (1,425 samples, 1.66%)</title><rect x="75.7100%" y="53" width="1.6620%" height="15" fill="rgb(239,60,40)"/><text x="75.9600%" y="63.50"></text></g><g><title>libsystem_kernel.dylib`__psynch_mutexwait (131 samples, 0.15%)</title><rect x="77.3767%" y="37" width="0.1528%" height="15" fill="rgb(206,27,48)"/><text x="77.6267%" y="47.50"></text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_firstfit_lock_slow (134 samples, 0.16%)</title><rect x="77.3744%" y="53" width="0.1563%" height="15" fill="rgb(225,35,8)"/><text x="77.6244%" y="63.50"></text></g><g><title>libsystem_kernel.dylib`__psynch_mutexdrop (590 samples, 0.69%)</title><rect x="77.5400%" y="37" width="0.6881%" height="15" fill="rgb(250,213,24)"/><text x="77.7900%" y="47.50"></text></g><g><title>libsystem_pthread.dylib`_pthread_mutex_firstfit_unlock_slow (600 samples, 0.70%)</title><rect x="77.5318%" y="53" width="0.6998%" height="15" fill="rgb(247,123,22)"/><text x="77.7818%" y="63.50"></text></g><g><title>tasks`async_std::task::executor::sleepers::Sleepers::notify_one (2,273 samples, 2.65%)</title><rect x="75.6808%" y="69" width="2.6511%" height="15" fill="rgb(231,138,38)"/><text x="75.9308%" y="79.50">ta..</text></g><g><title>tasks`async_std::task::executor::pool::schedule (2,339 samples, 2.73%)</title><rect x="75.6062%" y="85" width="2.7280%" height="15" fill="rgb(231,145,46)"/><text x="75.8562%" y="95.50">ta..</text></g><g><title>tasks`async_std::sync::waker_set::WakerSet::notify (2,573 samples, 3.00%)</title><rect x="75.4033%" y="101" width="3.0010%" height="15" fill="rgb(251,118,11)"/><text x="75.6533%" y="111.50">tas..</text></g><g><title>tasks`async_std::sync::waker_set::WakerSet::remove (559 samples, 0.65%)</title><rect x="78.4042%" y="101" width="0.6520%" height="15" fill="rgb(217,147,25)"/><text x="78.6542%" y="111.50"></text></g><g><title>tasks`&lt;async_std::sync::channel::Sender&lt;T&gt;::send::{{closure}}::SendFuture&lt;T&gt; as core::future::future::Future&gt;::poll (11,508 samples, 13.42%)</title><rect x="65.6807%" y="117" width="13.4221%" height="15" fill="rgb(247,81,37)"/><text x="65.9307%" y="127.50">tasks`&lt;async_std::sy..</text></g><g><title>tasks`&lt;std::future::SetOnDrop as core::ops::drop::Drop&gt;::drop (1,710 samples, 1.99%)</title><rect x="79.1029%" y="117" width="1.9944%" height="15" fill="rgb(209,12,38)"/><text x="79.3529%" y="127.50">t..</text></g><g><title>tasks`std::future::TLS_CX::__getit (1,305 samples, 1.52%)</title><rect x="81.1381%" y="117" width="1.5221%" height="15" fill="rgb(227,1,9)"/><text x="81.3881%" y="127.50"></text></g><g><title>tasks`std::future::poll_with_tls_context (33,248 samples, 38.78%)</title><rect x="45.0460%" y="133" width="38.7782%" height="15" fill="rgb(248,47,43)"/><text x="45.2960%" y="143.50">tasks`std::future::poll_with_tls_context</text></g><g><title>tasks`std::future::set_task_context (998 samples, 1.16%)</title><rect x="82.6602%" y="117" width="1.1640%" height="15" fill="rgb(221,10,30)"/><text x="82.9102%" y="127.50"></text></g><g><title>tasks`&lt;std::future::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll (36,991 samples, 43.14%)</title><rect x="40.9604%" y="149" width="43.1437%" height="15" fill="rgb(210,229,1)"/><text x="41.2104%" y="159.50">tasks`&lt;std::future::GenFuture&lt;T&gt; as core::future::future::Future&gt;::poll</text></g><g><title>tasks`std::future::set_task_context (240 samples, 0.28%)</title><rect x="83.8242%" y="133" width="0.2799%" height="15" fill="rgb(222,148,37)"/><text x="84.0742%" y="143.50"></text></g><g><title>tasks`std::future::poll_with_tls_context (114 samples, 0.13%)</title><rect x="84.1297%" y="149" width="0.1330%" height="15" fill="rgb(234,67,33)"/><text x="84.3797%" y="159.50"></text></g><g><title>tasks`async_task::raw::RawTask&lt;F,R,S,T&gt;::run (37,555 samples, 43.80%)</title><rect x="40.4670%" y="165" width="43.8015%" height="15" fill="rgb(247,98,35)"/><text x="40.7170%" y="175.50">tasks`async_task::raw::RawTask&lt;F,R,S,T&gt;::run</text></g><g><title>tasks`std::thread::local::LocalKey&lt;T&gt;::with (37,712 samples, 43.98%)</title><rect x="40.3072%" y="181" width="43.9847%" height="15" fill="rgb(247,138,52)"/><text x="40.5572%" y="191.50">tasks`std::thread::local::LocalKey&lt;T&gt;::with</text></g><g><title>libsystem_kernel.dylib`clock_get_time (6,684 samples, 7.80%)</title><rect x="84.4621%" y="149" width="7.7958%" height="15" fill="rgb(213,79,30)"/><text x="84.7121%" y="159.50">libsystem_k..</text></g><g><title>libsystem_kernel.dylib`mach_msg_trap (6,579 samples, 7.67%)</title><rect x="84.5846%" y="133" width="7.6733%" height="15" fill="rgb(246,177,23)"/><text x="84.8346%" y="143.50">libsystem_k..</text></g><g><title>libsystem_c.dylib`nanosleep (6,798 samples, 7.93%)</title><rect x="84.3408%" y="165" width="7.9287%" height="15" fill="rgb(230,62,27)"/><text x="84.5908%" y="175.50">libsystem_c..</text></g><g><title>libsystem_kernel.dylib`__semwait_signal (6,459 samples, 7.53%)</title><rect x="92.2731%" y="165" width="7.5333%" height="15" fill="rgb(216,154,8)"/><text x="92.5231%" y="175.50">libsystem_..</text></g><g><title>tasks`std::thread::sleep (13,372 samples, 15.60%)</title><rect x="84.2919%" y="181" width="15.5962%" height="15" fill="rgb(244,35,45)"/><text x="84.5419%" y="191.50">tasks`std::thread::sleep</text></g><g><title>tasks`async_std::task::executor::pool::main_loop (85,392 samples, 99.60%)</title><rect x="0.2939%" y="197" width="99.5953%" height="15" fill="rgb(251,115,12)"/><text x="0.5439%" y="207.50">tasks`async_std::task::executor::pool::main_loop</text></g><g><title>all (85,739 samples, 100%)</title><rect x="0.0000%" y="357" width="100.0000%" height="15" fill="rgb(240,54,50)"/><text x="0.2500%" y="367.50"></text></g><g><title>libsystem_pthread.dylib`thread_start (85,739 samples, 100.00%)</title><rect x="0.0000%" y="341" width="100.0000%" height="15" fill="rgb(233,84,52)"/><text x="0.2500%" y="351.50">libsystem_pthread.dylib`thread_start</text></g><g><title>libsystem_pthread.dylib`_pthread_start (85,739 samples, 100.00%)</title><rect x="0.0000%" y="325" width="100.0000%" height="15" fill="rgb(207,117,47)"/><text x="0.2500%" y="335.50">libsystem_pthread.dylib`_pthread_start</text></g><g><title>libsystem_pthread.dylib`_pthread_body (85,739 samples, 100.00%)</title><rect x="0.0000%" y="309" width="100.0000%" height="15" fill="rgb(249,43,39)"/><text x="0.2500%" y="319.50">libsystem_pthread.dylib`_pthread_body</text></g><g><title>tasks`std::sys::unix::thread::Thread::new::thread_start (85,739 samples, 100.00%)</title><rect x="0.0000%" y="293" width="100.0000%" height="15" fill="rgb(209,38,44)"/><text x="0.2500%" y="303.50">tasks`std::sys::unix::thread::Thread::new::thread_start</text></g><g><title>tasks`&lt;alloc::boxed::Box&lt;F&gt; as core::ops::function::FnOnce&lt;A&gt;&gt;::call_once (85,739 samples, 100.00%)</title><rect x="0.0000%" y="277" width="100.0000%" height="15" fill="rgb(236,212,23)"/><text x="0.2500%" y="287.50">tasks`&lt;alloc::boxed::Box&lt;F&gt; as core::ops::function::FnOnce&lt;A&gt;&gt;::call_once</text></g><g><title>tasks`core::ops::function::FnOnce::call_once{{vtable.shim}} (85,739 samples, 100.00%)</title><rect x="0.0000%" y="261" width="100.0000%" height="15" fill="rgb(242,79,21)"/><text x="0.2500%" y="271.50">tasks`core::ops::function::FnOnce::call_once{{vtable.shim}}</text></g><g><title>tasks`__rust_maybe_catch_panic (85,739 samples, 100.00%)</title><rect x="0.0000%" y="245" width="100.0000%" height="15" fill="rgb(211,96,35)"/><text x="0.2500%" y="255.50">tasks`__rust_maybe_catch_panic</text></g><g><title>tasks`std::panicking::try::do_call (85,739 samples, 100.00%)</title><rect x="0.0000%" y="229" width="100.0000%" height="15" fill="rgb(253,215,40)"/><text x="0.2500%" y="239.50">tasks`std::panicking::try::do_call</text></g><g><title>tasks`std::sys_common::backtrace::__rust_begin_short_backtrace (85,739 samples, 100.00%)</title><rect x="0.0000%" y="213" width="100.0000%" height="15" fill="rgb(211,81,21)"/><text x="0.2500%" y="223.50">tasks`std::sys_common::backtrace::__rust_begin_short_backtrace</text></g></svg></svg>
